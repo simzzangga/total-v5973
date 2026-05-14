@@ -23,7 +23,6 @@ def check_network_and_get_list():
         return None, "🔴 Connection Failed"
 
 # --- [2. v5.9.73 정밀 분석 엔진 핵심부] ---
-# 지휘관님, 이 함수 이름이 에러의 핵심이었습니다. 정확히 정의해 두었습니다.
 def analyze_v5_73_core(row):
     ticker, name = row['Code'], row['Name']
     ticker_str = str(ticker).zfill(6)
@@ -38,26 +37,22 @@ def analyze_v5_73_core(row):
         rename_map = {'시가':'OPEN','고가':'HIGH','저가':'LOW','종가':'CLOSE','거래량':'VOLUME','거래대금':'AMOUNT'}
         df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
         
-        # v5.9.73 오리지널 로직 연산
         body_ratio = (df['CLOSE'] - df['OPEN']).abs() / (df['HIGH'] - df['LOW'] + 0.001)
         vol_ma20 = df['VOLUME'].iloc[-21:-1].mean()
         vol_ratio = df['VOLUME'].iloc[-1] / (vol_ma20 + 1)
         pre_20_close = df['CLOSE'].iloc[-21:-1]
         cv_val = (pre_20_close.std() / pre_20_close.mean()) * 100
         
-        # 유사도 산출
         cv_score = max(0, 100 - (abs(cv_val - 1.8) * 20))
         vol_score = min(100, (vol_ratio / 5.0) * 100)
         similarity = (cv_score * 0.3) + (vol_score * 0.7)
         
-        # 적합도 가중치 배점
         fit_score = 0
         if 82.5 <= similarity <= 88.0: fit_score += 30
         if 2.8 <= vol_ratio <= 4.2: fit_score += 30
         if 1.5 <= cv_val <= 2.2: fit_score += 25
         if 0.65 <= body_ratio.iloc[-1] <= 0.85: fit_score += 15
         
-        # 백테스트를 위해 50점 이상 수집
         if fit_score >= 50:
             return {
                 "종목명": name, "종목코드": ticker_str, "적합도": int(fit_score),
@@ -88,9 +83,7 @@ if st.button("🚀 전 종목 병렬 스캔 및 데이터 수집 시작", width=
         start_time = time.time()
         total_count = len(krx_list)
         
-        # 병렬 엔진 가동
         with ThreadPoolExecutor(max_workers=20) as executor:
-            # 여기서 analyze_v5_73_core 함수를 호출합니다.
             futures = {executor.submit(analyze_v5_73_core, row): row for _, row in krx_list.iterrows()}
             completed = 0
             for future in as_completed(futures):
@@ -114,14 +107,20 @@ if st.button("🚀 전 종목 병렬 스캔 및 데이터 수집 시작", width=
             df_final = pd.DataFrame(results).sort_values(by='적합도', ascending=False)
             st.subheader(f"📊 스캔 리포트 ({len(results)}개 포착)")
             
-            # 강조 규칙
+            # --- [수정 구간: applymap -> map 적용] ---
             def highlight_fit(val):
-                if val >= 90: return 'background-color: #d4edda; font-weight: bold'
-                if val >= 70: return 'background-color: #fff3cd'
+                if val >= 90: return 'background-color: #d4edda; font-weight: bold; color: #155724'
+                if val >= 70: return 'background-color: #fff3cd; color: #856404'
                 return ''
             
             display_cols = ["종목명", "종목코드", "적합도", "현재가", "유사도", "거래량비", "CV", "몸통비율", "거래대금(억)"]
-            st.dataframe(df_final[display_cols].style.applymap(highlight_fit, subset=['적합도']), use_container_width=True, hide_index=True)
+            
+            # 최신 Pandas 규격에 맞게 .style.map() 사용
+            try:
+                st.dataframe(df_final[display_cols].style.map(highlight_fit, subset=['적합도']), use_container_width=True, hide_index=True)
+            except:
+                # 혹시 모를 구버전 대응을 위한 예외 처리
+                st.dataframe(df_final[display_cols].style.applymap(highlight_fit, subset=['적합도']), use_container_width=True, hide_index=True)
             
             # CSV 다운로드 버튼
             csv_data = df_final[display_cols].to_csv(index=False).encode('utf-8-sig')
@@ -130,7 +129,8 @@ if st.button("🚀 전 종목 병렬 스캔 및 데이터 수집 시작", width=
                 label="📥 결과 CSV 파일로 저장",
                 data=csv_data,
                 file_name=f"{today_str}_Phoenix_v73_Scan.csv",
-                mime="text/csv"
+                mime="text/csv",
+                key="download_btn"
             )
         else:
             st.warning("⚠️ 포착된 종목이 없습니다.")
