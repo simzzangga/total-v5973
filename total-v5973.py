@@ -7,22 +7,28 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# --- [1. 시스템 설정 및 네트워크 체크] ---
+# --- [1. 시스템 설정 및 네트워크 관리] ---
 BACKUP_KRX_FILE = "backup_krx.json"
 
-@st.cache_data(ttl=3600)
-def check_network_and_get_list():
+def get_network_status():
+    """현재 네트워크 상태와 종목 리스트를 반환 (캐시 없이 실시간 체크용)"""
     try:
         df = fdr.StockListing('KRX')[['Code', 'Name']]
         df['Code'] = df['Code'].astype(str).str.zfill(6)
         df.to_json(BACKUP_KRX_FILE)
         return df, "🟢 Online (Server Connected)"
-    except:
+    except Exception as e:
         if os.path.exists(BACKUP_KRX_FILE):
             return pd.read_json(BACKUP_KRX_FILE), "🟡 Offline (Backup Mode)"
-        return None, "🔴 Connection Failed"
+        return None, f"🔴 Connection Failed: {str(e)}"
 
-# --- [2. v5.9.73 정밀 분석 엔진 핵심부] ---
+# 캐싱된 데이터 가져오기 (성능용)
+@st.cache_data(ttl=3600)
+def cached_krx_list():
+    df, _ = get_network_status()
+    return df
+
+# --- [2. v5.9.73 정밀 분석 엔진] ---
 def analyze_v5_73_core(row):
     ticker, name = row['Code'], row['Name']
     ticker_str = str(ticker).zfill(6)
@@ -64,16 +70,35 @@ def analyze_v5_73_core(row):
     except: pass
     return None
 
-# --- [3. UI 레이아웃 및 제어부] ---
-st.set_page_config(page_title="Phoenix v5.9.73 Strategic Radar", layout="wide")
+# --- [3. UI 레이아웃] ---
+st.set_page_config(page_title="Phoenix v5.9.77 Network Fortified", layout="wide")
 st.markdown("<style>div.stApp {background: white !important;} * {color: black !important;}</style>", unsafe_allow_html=True)
 
-krx_list, net_status = check_network_and_get_list()
-col_h1, col_h2 = st.columns([8, 2])
-with col_h1: st.title("⚡ Phoenix v5.9.73 [Full-Scan Radar]")
-with col_h2: st.metric("Network", net_status)
+# 초기 네트워크 체크
+if 'krx_data' not in st.session_state:
+    df, status = get_network_status()
+    st.session_state['krx_data'] = df
+    st.session_state['net_status'] = status
 
+# 헤더 영역
+col_h1, col_h2 = st.columns([7, 3])
+with col_h1: 
+    st.title("⚡ Phoenix v5.9.73 [Strategic Radar]")
+with col_h2: 
+    st.metric("Network Status", st.session_state['net_status'])
+    if st.button("🔄 네트워크 재연결 및 백업 갱신"):
+        st.cache_data.clear() # 캐시 강제 삭제
+        df, status = get_network_status()
+        st.session_state['krx_data'] = df
+        st.session_state['net_status'] = status
+        st.rerun()
+
+st.divider()
+
+# 메인 스캔 버튼
 if st.button("🚀 전 종목 병렬 스캔 및 데이터 수집 시작", width='stretch'):
+    krx_list = st.session_state['krx_data']
+    
     if krx_list is not None:
         results = []
         prog_bar = st.progress(0)
@@ -96,7 +121,7 @@ if st.button("🚀 전 종목 병렬 스캔 및 데이터 수집 시작", width=
                     avg = elapsed / completed
                     rem = avg * (total_count - completed)
                     prog_bar.progress(completed / total_count)
-                    status_text.markdown(f"**📡 스캔 중:** `{completed}`/`{total_count}` 완료")
+                    status_text.markdown(f"**📡 스캔 현황:** `{completed}`/`{total_count}`")
                     time_text.markdown(f"**⏱️ 예상 남은 시간:** `{int(rem // 60)}분 {int(rem % 60)}초` ")
 
         prog_bar.empty()
@@ -107,32 +132,23 @@ if st.button("🚀 전 종목 병렬 스캔 및 데이터 수집 시작", width=
             df_final = pd.DataFrame(results).sort_values(by='적합도', ascending=False)
             st.subheader(f"📊 스캔 리포트 ({len(results)}개 포착)")
             
-            # --- [수정 구간: applymap -> map 적용] ---
             def highlight_fit(val):
                 if val >= 90: return 'background-color: #d4edda; font-weight: bold; color: #155724'
                 if val >= 70: return 'background-color: #fff3cd; color: #856404'
                 return ''
             
             display_cols = ["종목명", "종목코드", "적합도", "현재가", "유사도", "거래량비", "CV", "몸통비율", "거래대금(억)"]
+            st.dataframe(df_final[display_cols].style.map(highlight_fit, subset=['적합도']), use_container_width=True, hide_index=True)
             
-            # 최신 Pandas 규격에 맞게 .style.map() 사용
-            try:
-                st.dataframe(df_final[display_cols].style.map(highlight_fit, subset=['적합도']), use_container_width=True, hide_index=True)
-            except:
-                # 혹시 모를 구버전 대응을 위한 예외 처리
-                st.dataframe(df_final[display_cols].style.applymap(highlight_fit, subset=['적합도']), use_container_width=True, hide_index=True)
-            
-            # CSV 다운로드 버튼
             csv_data = df_final[display_cols].to_csv(index=False).encode('utf-8-sig')
             today_str = datetime.date.today().strftime("%Y-%m-%d")
             st.download_button(
                 label="📥 결과 CSV 파일로 저장",
                 data=csv_data,
                 file_name=f"{today_str}_Phoenix_v73_Scan.csv",
-                mime="text/csv",
-                key="download_btn"
+                mime="text/csv"
             )
         else:
             st.warning("⚠️ 포착된 종목이 없습니다.")
     else:
-        st.error("데이터 서버 접속 실패 및 백업 파일 부재.")
+        st.error("데이터 서버 접속에 실패했습니다. 상단의 재연결 버튼을 눌러주세요.")
