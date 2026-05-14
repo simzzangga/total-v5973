@@ -13,7 +13,6 @@ BACKUP_KRX_FILE = "backup_krx.json"
 @st.cache_data(ttl=3600)
 def check_network_and_get_list():
     try:
-        # 네트워크 연결 시도
         df = fdr.StockListing('KRX')[['Code', 'Name']]
         df['Code'] = df['Code'].astype(str).str.zfill(6)
         df.to_json(BACKUP_KRX_FILE)
@@ -23,8 +22,9 @@ def check_network_and_get_list():
             return pd.read_json(BACKUP_KRX_FILE), "🟡 Offline (Backup Mode)"
         return None, "🔴 Connection Failed"
 
-# --- [2. v5.9.75 비교 분석 엔진 (73 로직 기반)] ---
-def analyze_v5_75_core(row):
+# --- [2. v5.9.73 정밀 분석 엔진 핵심부] ---
+# 지휘관님, 이 함수 이름이 에러의 핵심이었습니다. 정확히 정의해 두었습니다.
+def analyze_v5_73_core(row):
     ticker, name = row['Code'], row['Name']
     ticker_str = str(ticker).zfill(6)
     target_date = datetime.date.today()
@@ -33,29 +33,31 @@ def analyze_v5_75_core(row):
     try:
         df = fdr.DataReader(ticker_str, start_date, target_date)
         if df is None or len(df) < 40: return None
+        
         df.columns = [c.upper() for c in df.columns]
         rename_map = {'시가':'OPEN','고가':'HIGH','저가':'LOW','종가':'CLOSE','거래량':'VOLUME','거래대금':'AMOUNT'}
         df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
         
-        # 73버전과 동일한 지표 산출
+        # v5.9.73 오리지널 로직 연산
         body_ratio = (df['CLOSE'] - df['OPEN']).abs() / (df['HIGH'] - df['LOW'] + 0.001)
         vol_ma20 = df['VOLUME'].iloc[-21:-1].mean()
         vol_ratio = df['VOLUME'].iloc[-1] / (vol_ma20 + 1)
         pre_20_close = df['CLOSE'].iloc[-21:-1]
         cv_val = (pre_20_close.std() / pre_20_close.mean()) * 100
         
+        # 유사도 산출
         cv_score = max(0, 100 - (abs(cv_val - 1.8) * 20))
         vol_score = min(100, (vol_ratio / 5.0) * 100)
         similarity = (cv_score * 0.3) + (vol_score * 0.7)
         
-        # 적합도 가중치 (v5.9.73과 동일)
+        # 적합도 가중치 배점
         fit_score = 0
         if 82.5 <= similarity <= 88.0: fit_score += 30
         if 2.8 <= vol_ratio <= 4.2: fit_score += 30
         if 1.5 <= cv_val <= 2.2: fit_score += 25
         if 0.65 <= body_ratio.iloc[-1] <= 0.85: fit_score += 15
         
-        # 비교 테스트를 위해 50점 이상 수집
+        # 백테스트를 위해 50점 이상 수집
         if fit_score >= 50:
             return {
                 "종목명": name, "종목코드": ticker_str, "적합도": int(fit_score),
@@ -67,55 +69,70 @@ def analyze_v5_75_core(row):
     except: pass
     return None
 
-# --- [3. UI 레이아웃] ---
-st.set_page_config(page_title="Phoenix v5.9.75 Comparison", layout="wide")
+# --- [3. UI 레이아웃 및 제어부] ---
+st.set_page_config(page_title="Phoenix v5.9.73 Strategic Radar", layout="wide")
 st.markdown("<style>div.stApp {background: white !important;} * {color: black !important;}</style>", unsafe_allow_html=True)
 
-# 헤더 및 네트워크 상태
 krx_list, net_status = check_network_and_get_list()
 col_h1, col_h2 = st.columns([8, 2])
-with col_h1: st.title("🛰️ Phoenix v5.9.75 [Strategic]")
+with col_h1: st.title("⚡ Phoenix v5.9.73 [Full-Scan Radar]")
 with col_h2: st.metric("Network", net_status)
 
-if st.button("🚀 전 종목 비교 스캔 시작 (v73 로직 기반)", width='stretch'):
+if st.button("🚀 전 종목 병렬 스캔 및 데이터 수집 시작", width='stretch'):
     if krx_list is not None:
         results = []
         prog_bar = st.progress(0)
         status_text = st.empty()
+        time_text = st.empty()
+        
         start_time = time.time()
         total_count = len(krx_list)
         
+        # 병렬 엔진 가동
         with ThreadPoolExecutor(max_workers=20) as executor:
+            # 여기서 analyze_v5_73_core 함수를 호출합니다.
             futures = {executor.submit(analyze_v5_73_core, row): row for _, row in krx_list.iterrows()}
             completed = 0
             for future in as_completed(futures):
                 completed += 1
                 res = future.result()
                 if res: results.append(res)
-                if completed % 50 == 0:
+                
+                if completed % 50 == 0 or completed == total_count:
+                    elapsed = time.time() - start_time
+                    avg = elapsed / completed
+                    rem = avg * (total_count - completed)
                     prog_bar.progress(completed / total_count)
-                    status_text.text(f"스캔 중: {completed}/{total_count} 완료")
+                    status_text.markdown(f"**📡 스캔 중:** `{completed}`/`{total_count}` 완료")
+                    time_text.markdown(f"**⏱️ 예상 남은 시간:** `{int(rem // 60)}분 {int(rem % 60)}초` ")
 
         prog_bar.empty()
         status_text.empty()
+        time_text.empty()
         
         if results:
             df_final = pd.DataFrame(results).sort_values(by='적합도', ascending=False)
-            st.subheader(f"📊 스캔 결과 ({len(results)}개 포착)")
-            st.dataframe(df_final, use_container_width=True, hide_index=True)
+            st.subheader(f"📊 스캔 리포트 ({len(results)}개 포착)")
             
-            # CSV 저장 섹션
-            st.divider()
+            # 강조 규칙
+            def highlight_fit(val):
+                if val >= 90: return 'background-color: #d4edda; font-weight: bold'
+                if val >= 70: return 'background-color: #fff3cd'
+                return ''
+            
+            display_cols = ["종목명", "종목코드", "적합도", "현재가", "유사도", "거래량비", "CV", "몸통비율", "거래대금(억)"]
+            st.dataframe(df_final[display_cols].style.applymap(highlight_fit, subset=['적합도']), use_container_width=True, hide_index=True)
+            
+            # CSV 다운로드 버튼
+            csv_data = df_final[display_cols].to_csv(index=False).encode('utf-8-sig')
             today_str = datetime.date.today().strftime("%Y-%m-%d")
-            csv_data = df_final.to_csv(index=False).encode('utf-8-sig')
             st.download_button(
-                label="📥 결과 CSV 파일로 저장 (날짜 포맷)",
+                label="📥 결과 CSV 파일로 저장",
                 data=csv_data,
-                file_name=f"{today_str}_Phoenix_v75_Results.csv",
-                mime="text/csv",
-                width='stretch'
+                file_name=f"{today_str}_Phoenix_v73_Scan.csv",
+                mime="text/csv"
             )
         else:
             st.warning("⚠️ 포착된 종목이 없습니다.")
     else:
-        st.error("데이터 서버에 접속할 수 없으며 백업 파일도 존재하지 않습니다.")
+        st.error("데이터 서버 접속 실패 및 백업 파일 부재.")
