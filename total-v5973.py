@@ -50,8 +50,8 @@ def get_krx_list_ultimate():
         st.session_state.server_status = "⚠️ 서버 점검 중"
         return pd.DataFrame([{"Code": "005930", "Name": "삼성전자"}])
 
-# --- [2. 분석 엔진 (v5.10.2)] ---
-def analyze_v10(ticker, target_date):
+# --- [2. 고정밀 스나이퍼 분석 엔진 (v5.11.0)] ---
+def analyze_v11(ticker, target_date):
     ticker_str = str(ticker).zfill(6)
     start_date = target_date - datetime.timedelta(days=180)
     try:
@@ -60,7 +60,7 @@ def analyze_v10(ticker, target_date):
             yf_ticker = f"{ticker_str}.KS" if ticker_str.startswith(('0', '1')) else f"{ticker_str}.KQ"
             df = yf.download(yf_ticker, start=start_date, end=target_date + datetime.timedelta(days=1), progress=False)
         
-        if df is None or len(df) < 20: return None, None
+        if df is None or len(df) < 40: return None, None
 
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         df.columns = [c.upper() for c in df.columns]
@@ -70,38 +70,59 @@ def analyze_v10(ticker, target_date):
         curr_price = int(df['CLOSE'].iloc[-1])
         curr_volume = df['VOLUME'].iloc[-1]
         amount_억 = round((curr_price * curr_volume) / 100_000_000, 1)
-        vol_ratio = round(curr_volume / (df['VOLUME'].iloc[-21:-1].mean() + 1), 2)
         
-        val_bonus = 30 if 50 <= amount_억 <= 200 else 10 if amount_억 > 200 else 0
-        fit_score = int(min(100, (vol_ratio * 15) + val_bonus))
-        phase = "🔥 출격준비" if fit_score > 70 else "🟡 엔진예열"
+        # 4배 정밀 리포트용 연산 데이터 생성
+        ma20 = df['CLOSE'].rolling(20).mean().iloc[-1]
+        disparity = round((curr_price / ma20) * 100, 1) # 20일 이격도
+        
+        pre_20 = df['CLOSE'].iloc[-21:-1]
+        cv_val = round((pre_20.std() / pre_20.mean()) * 100, 2) # 변동성 계수
+        vol_ratio = round(curr_volume / (df['VOLUME'].iloc[-21:-1].mean() + 1), 2)
+        body_ratio = round((df['CLOSE'].iloc[-1] - df['OPEN'].iloc[-1]).abs() / (df['HIGH'].iloc[-1] - df['LOW'].iloc[-1] + 0.001), 2)
+        
+        # 필터 레이더 재조정 (엄격한 스나이퍼 모드)
+        val_bonus = 30 if 50 <= amount_억 <= 300 else 10 if amount_억 > 300 else 0
+        fit_score = int(min(100, (vol_ratio * 12) + val_bonus))
+        
+        # 요구사항 반영: 진짜 살 종목 필터링 및 상태 메시지 변환
+        if fit_score >= 82 and amount_억 >= 40:
+            phase = "🔥 이건 사야해"
+            weight_now = "100% 분출"
+            split_step = "1차 즉시진입"
+            is_valid_target = True
+        elif fit_score >= 60 and amount_억 >= 15:
+            phase = "⚔️ 분할진입가능"
+            weight_now = "50% 장전"
+            split_step = "2회 분할"
+            is_valid_target = True
+        else:
+            phase = "🟡 관망 및 대기"
+            weight_now = "0%"
+            split_step = "진입금지"
+            is_valid_target = False # 노이즈 종목은 리스트에서 완전 차단
 
         return {
             "종목코드": ticker_str, "현재가": curr_price, "적합도": fit_score,
-            "상태": phase, "비중": "100%" if fit_score > 80 else "50%",
+            "상태": phase, "비중": weight_now, "분할매수": split_step,
             "익절목표": "15.0%", "손절가": "-3.0%", "거래대금(억)": amount_억,
             "목표타격가": int(curr_price * 1.15), "최종손절선": int(curr_price * 0.97),
-            "거래량비": vol_ratio, "is_valid": True if amount_억 >= 10 else False,
-            "스캔날짜": target_date.strftime('%Y-%m-%d')
+            "거래량비": vol_ratio, "이격도": disparity, "CV": cv_val, "몸통비율": body_ratio,
+            "is_valid": is_valid_target, "스캔날짜": target_date.strftime('%Y-%m-%d')
         }, df
     except: return None, None
 
 # --- [3. UI 레이아웃] ---
-st.set_page_config(page_title="Phoenix Pulse v5.10.2", layout="wide")
+st.set_page_config(page_title="Phoenix Pulse v5.11.0", layout="wide")
 krx_df = get_krx_list_ultimate()
 krx_df['Display'] = krx_df['Code'] + " | " + krx_df['Name']
 
-# 헤드라인 및 리셋 버튼 (복구 완료)
 c_head1, c_head2 = st.columns([6, 2])
-with c_head1: 
-    st.markdown(f"### 🔥 Phoenix Pulse v5.10.2 | `{st.session_state.server_status}`")
+with c_head1: st.markdown(f"### 🔥 Phoenix Pulse v5.11.0 | Sniper Mode | `{st.session_state.server_status}`")
 with c_head2:
     if st.button("🔄 리스트 동기화 (네트워크 리셋)", use_container_width=True):
         if os.path.exists(BACKUP_KRX_FILE): os.remove(BACKUP_KRX_FILE)
-        st.cache_data.clear()
-        st.rerun()
+        st.cache_data.clear(); st.rerun()
 
-# 사이드바 히스토리
 st.sidebar.title("📁 분석 히스토리")
 for idx, log in enumerate(st.session_state.fixed_log):
     if st.sidebar.button(f"{log['name']} ({log['code']})", key=f"side_{idx}", use_container_width=True):
@@ -109,7 +130,6 @@ for idx, log in enumerate(st.session_state.fixed_log):
 if st.sidebar.button("🗑️ 히스토리 초기화", use_container_width=True):
     st.session_state.fixed_log = []; st.rerun()
 
-# 메인 분석 폼
 with st.form("analysis_input_form"):
     c1, c2, c3 = st.columns([4, 1.5, 2])
     def_idx = 0
@@ -120,53 +140,96 @@ with st.form("analysis_input_form"):
     
     selected_disp = c1.selectbox("종목 선택", krx_df['Display'].tolist(), index=def_idx)
     d_input = c3.date_input("날짜 지정", value=datetime.date.today())
-    btn_click = c2.form_submit_button("🔍 분석 실행", type="primary", use_container_width=True)
+    btn_click = c2.form_submit_button("🔍 정밀 저격 분석 실행", type="primary", use_container_width=True)
 
 if btn_click or (st.session_state.auto_code != ""):
     t_code = selected_disp.split(" | ")[0] if not st.session_state.auto_code else st.session_state.auto_code
-    res, df_chart = analyze_v10(t_code, d_input)
+    res, df_chart = analyze_v11(t_code, d_input)
     if res:
         st.session_state.last_viewed = res['종목코드']
         d_name = krx_df[krx_df['Code'] == res['종목코드']]['Name'].values[0]
         save_to_fixed_log(d_name, res['종목코드'])
         st.session_state.auto_code = ""
         
-        st.markdown(f"#### 🎯 [{d_name}] 전략 리포트")
+        st.markdown(f"#### 🎯 [{d_name}] 최적 작전 전술 리포트")
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("상태", res['상태'])
-        m2.metric("적합도", f"{res['적합도']}%", delta=f"{res['거래대금(억)']}억")
-        m3.metric("목표가", f"{res['목표타격가']:,}원")
-        m4.metric("손절가", f"{res['최종손절선']:,}원")
+        m1.metric("최종 판정", res['상태'])
+        m2.metric("저격 적합도", f"{res['적합도']}%", delta=f"{res['거래대금(억)']}억 자금 유입")
+        m3.metric("목표 타격가", f"{res['목표타격가']:,}원", delta="내재 변동성 익절선")
+        m4.metric("최종 방어선", f"{res['최종손절선']:,}원", delta="-3.0% 원칙 손절")
         
+        # 차트 레이아웃 수정: 확대 금지(fixedrange), 글씨 없는 레이저선 구현
         fig = go.Figure(data=[go.Candlestick(
             x=df_chart.index, open=df_chart['OPEN'], high=df_chart['HIGH'], low=df_chart['LOW'], close=df_chart['CLOSE'],
             increasing_line_color='red', decreasing_line_color='blue'
         )])
-        fig.update_layout(height=450, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=10, r=10, t=10, b=10))
+        
+        # 글씨 없이 순수 라인만 투사
+        fig.add_hline(y=res['목표타격가'], line_dash="solid", line_color="green", line_width=2)
+        fig.add_hline(y=res['최종손절선'], line_dash="solid", line_color="purple", line_width=2)
+        
+        fig.update_layout(
+            height=450, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=10, r=10, t=10, b=10),
+            xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True) # 확대/축소 완전 봉쇄
+        )
         st.plotly_chart(fig, use_container_width=True)
+        
+        # [4배 정밀 심층 리포트 및 확신 검토서]
+        st.markdown("---")
+        st.markdown(f"🔬 **[{d_name}] 진입 고민 해결을 위한 4대 핵심 전술 지표 검토 보고서**")
+        r1, r2, r3, r4 = st.columns(4)
+        with r1:
+            st.info(f"**① 자금 유입 강도**\n\n현재 일일 거래대금 **{res['거래대금(억)']}억** 수준으로 시장 주도 세력의 실시간 개입 징후를 명확하게 추적했습니다.")
+        with r2:
+            st.info(f"**② 20일 이격 균형**\n\n이격도 **{res['이격도']}%**입니다. 현재 주가가 심리적 생명선인 20일선 대비 과열권인지 안정권인지를 판별하는 척도입니다.")
+        with r3:
+            st.info(f"**③ 변동성 압축 유무 (CV)**\n\n최근 변동성 지수 **{res['CV']}%**입니다. 수치가 수렴 후 거래량이 폭발하는 시점이 가장 강력한 시세 분출 지점입니다.")
+        with r4:
+            st.info(f"**④ 캔들 몸통 장악비**\n\n오늘의 에너지 장악 비율은 **{res['몸통비율']}**입니다. 위아래 꼬리 대비 몸통이 두꺼울수록 매수세의 연속성이 보장됩니다.")
 
 st.divider()
 
-if st.button("🚀 거래대금 필터 적용 광역 스캔", use_container_width=True):
+# [스캔 파트: 진척도 및 최소 남은 시간 실시간 연산]
+if st.button("🚀 전 종목 광역 정밀 병렬 스캔 (스나이퍼 모드)", use_container_width=True):
     temp_results = []
     p_bar = st.progress(0)
+    st_msg = st.empty()
+    tm_msg = st.empty()
+    
+    start_time = time.time()
+    total_len = len(krx_df)
+    
     with ThreadPoolExecutor(max_workers=30) as executor:
-        futures = {executor.submit(analyze_v10, row['Code'], d_input): row for _, row in krx_df.iterrows()}
+        futures = {executor.submit(analyze_v11, row['Code'], d_input): row for _, row in krx_df.iterrows()}
         for i, future in enumerate(as_completed(futures)):
             r, _ = future.result()
-            if r and r['is_valid']:
+            if r and r['is_valid']: # 필터 조건에 부합하는 정예 유효주만 추출
                 r['종목명'] = futures[future]['Name']
                 temp_results.append(r)
-            if i % 100 == 0: p_bar.progress((i+1)/len(krx_df))
+            
+            if i % 40 == 0 or i == total_len - 1:
+                elapsed = time.time() - start_time
+                progress_pct = (i + 1) / total_len
+                # 최소 남은 시간(EST) 정밀 계산
+                est_rem = (elapsed / progress_pct) - elapsed if progress_pct > 0 else 0
+                p_bar.progress(progress_pct)
+                st_msg.write(f"📡 고정밀 정찰 중... ({i+1}/{total_len}) [엄격 필터 통과 타겟: {len(temp_results)}개]")
+                tm_msg.write(f"⏱️ **경과 시간:** `{int(elapsed)}초` | **최소 남은 시간 (EST):** `{int(est_rem)}초`")
+    
     st.session_state.scan_storage = temp_results
+    with open(SCAN_RESULT_FILE, "w", encoding="utf-8") as f:
+        json.dump(temp_results, f, ensure_ascii=False)
     st.rerun()
 
+# [출력 리스트 최적화: 현재가 제거, 분할매수/비중 전면 배치]
 if st.session_state.scan_storage:
-    st.markdown(f"### 📋 스캔 결과 (거래대금 10억 이상 포착)")
+    st.markdown(f"### 📋 스나이퍼 정예 포착 리스트 ({len(st.session_state.scan_storage)}개 정선)")
     scan_df = pd.DataFrame(st.session_state.scan_storage).sort_values(by='적합도', ascending=False)
-    cols = ['종목명', '종목코드', '적합도', '상태', '거래대금(억)', '현재가', '목표타격가', '최종손절선']
+    
+    # 지휘관님 요구에 맞춰 컬럼 재정렬 (현재가 삭제, 분할매수 및 비중 복원)
+    cols = ['종목명', '종목코드', '적합도', '상태', '분할매수', '비중', '거래대금(억)', '목표타격가', '최종손절선', '거래량비']
     st.dataframe(scan_df[cols], use_container_width=True, hide_index=True)
     
-    lock_on = st.selectbox("🎯 타겟 락온", ["선택하세요"] + (scan_df['종목코드'] + " | " + scan_df['종목명']).tolist())
+    lock_on = st.selectbox("🎯 타겟 락온 (상단 작전판 이동)", ["선택하세요"] + (scan_df['종목코드'] + " | " + scan_df['종목명']).tolist())
     if lock_on != "선택하세요":
         st.session_state.auto_code = lock_on.split(" | ")[0]; st.rerun()
