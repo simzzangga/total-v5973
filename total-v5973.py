@@ -14,7 +14,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 SCAN_RESULT_FILE = "last_scan_results.json"
 ANALYSIS_LOG_FILE, BACKUP_KRX_FILE = "analysis_log_v5.json", "backup_krx.json"
 
-# 세션 상태 초기화
 if "scan_storage" not in st.session_state:
     if os.path.exists(SCAN_RESULT_FILE):
         try:
@@ -34,7 +33,6 @@ def save_to_fixed_log(name, code):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_krx_list_ultimate():
-    # 1순위: 로컬 백업 파일 확인 (서버 다운 대비)
     if os.path.exists(BACKUP_KRX_FILE):
         try:
             df_l = pd.read_json(BACKUP_KRX_FILE)
@@ -42,8 +40,6 @@ def get_krx_list_ultimate():
                 st.session_state.server_status = "🔥 출격 준비 완료 (LOCAL FAST)"
                 return df_l
         except: pass
-    
-    # 2순위: KRX 서버 접속
     try:
         df = fdr.StockListing('KRX')[['Code', 'Name']]
         df['Code'] = df['Code'].astype(str).str.zfill(6)
@@ -51,43 +47,50 @@ def get_krx_list_ultimate():
         st.session_state.server_status = "🔥 출격 준비 완료 (SERVER LIVE)"
         return df
     except:
-        # 서버 장애 시 안내 및 기본 샘플 제공
         st.session_state.server_status = "⚠️ 서버 점검 중 (LOCAL BACKUP 사용 권장)"
         return pd.DataFrame([{"Code": "005930", "Name": "삼성전자"}])
 
-# --- [2. v5.9.96 ATR 하이퍼 다이내믹 엔진] ---
-def analyze_overload_v96(ticker, target_date):
+# --- [2. v5.9.97 ATR 하이퍼 다이내믹 엔진 (보정형)] ---
+def analyze_overload_v97(ticker, target_date):
     ticker_str = str(ticker).zfill(6)
-    start_date = target_date - datetime.timedelta(days=150)
+    start_date = target_date - datetime.timedelta(days=180)
+    df = None
     try:
+        # 데이터 수집 (서버 다운 시 yfinance 자동 전환)
         df = fdr.DataReader(ticker_str, start_date, target_date)
-        if df is None or len(df) < 40: return None, None
-        df.columns = [c.upper() for c in df.columns]
-        df = df.rename(columns={'시가':'OPEN','고가':'HIGH','저가':'LOW','종가':'CLOSE','거래량':'VOLUME'}).reset_index()
+        if df is None or df.empty:
+            yf_ticker = f"{ticker_str}.KS" if ticker_str.startswith(('0', '1')) else f"{ticker_str}.KQ"
+            df = yf.download(yf_ticker, start=start_date, end=target_date + datetime.timedelta(days=1), progress=False)
         
-        # 패턴 B: 6일 연속 거래량 감소 탐지
+        if df is None or len(df) < 30: return None, None
+
+        # 컬럼 표준화 (MultiIndex 및 소문자 대응)
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+        df.columns = [c.upper() for c in df.columns]
+        df = df.rename(columns={'시가':'OPEN','고가':'HIGH','저가':'LOW','종가':'CLOSE','거래량':'VOLUME','ADJ CLOSE':'CLOSE'})
+        df = df[['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME']].dropna()
+        
+        # 패턴 B 및 ATR 연산
         vol_cliff = (df['VOLUME'] < df['VOLUME'].shift(1)).iloc[-6:].all()
         
-        # ATR 변동성 연산 (목표가 7%~30% 정밀 산출)
         high_low = df['HIGH'] - df['LOW']
         high_close = (df['HIGH'] - df['CLOSE'].shift(1)).abs()
         low_close = (df['LOW'] - df['CLOSE'].shift(1)).abs()
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         atr = tr.rolling(14).mean().iloc[-1]
-        volatility_rate = (atr / df['CLOSE'].iloc[-1]) * 100
+        
+        curr_price = df['CLOSE'].iloc[-1]
+        volatility_rate = (atr / curr_price) * 100
         
         target_profit = round(max(7.0, min(30.0, volatility_rate * 4.5)), 1)
-        stop_loss = -3.0 # 손절 고정 원칙
+        stop_loss = -3.0
         
-        # 영점 조절 (CV 1.9 / SIM 85)
         pre_20 = df['CLOSE'].iloc[-21:-1]
         cv_val = (pre_20.std() / pre_20.mean()) * 100
         vol_ratio = df['VOLUME'].iloc[-1] / (df['VOLUME'].iloc[-21:-1].mean() + 1)
         body_ratio = (df['CLOSE'].iloc[-1] - df['OPEN'].iloc[-1]).abs() / (df['HIGH'].iloc[-1] - df['LOW'].iloc[-1] + 0.001)
         
-        cv_score = max(0, 100 - (abs(cv_val - 1.9) * 20))
-        vol_score = min(100, (vol_ratio / 5.0) * 100)
-        similarity = (cv_score * 0.3) + (vol_score * 0.7)
+        similarity = ((max(0, 100 - (abs(cv_val - 1.9) * 20))) * 0.3) + ((min(100, (vol_ratio / 5.0) * 100)) * 0.7)
         
         fit_score = 0
         if 84.5 <= similarity <= 90.0: fit_score += 30
@@ -96,38 +99,36 @@ def analyze_overload_v96(ticker, target_date):
         if 0.65 <= body_ratio <= 0.85: fit_score += 15
         if vol_cliff: fit_score += 20
         
-        is_noise = (target_date.weekday() == 2) or (target_date.month in [2, 3])
         phase, weight_now = "🟡 관망", "0%"
-        if fit_score >= 80:
-            phase, weight_now = ("⚠️ 고위험매수", "15%") if is_noise else ("🔥 즉시매수", "100%")
+        if fit_score >= 80: phase, weight_now = "🔥 즉시매수", "100%"
         elif fit_score >= 60: phase, weight_now = "⚔️ 분할진입", "50%"
         elif vol_cliff: phase, weight_now = "⚡ 절벽포착", "30%"
 
         return {
-            "종목코드": ticker_str, "현재가": int(df['CLOSE'].iloc[-1]), "적합도": fit_score,
+            "종목코드": ticker_str, "현재가": int(curr_price), "적합도": int(fit_score),
             "상태": phase, "비중": weight_now, "익절목표": f"{target_profit}%", "손절가": f"{stop_loss}%",
-            "목표타격가": int(df['CLOSE'].iloc[-1] * (1 + target_profit/100)),
-            "최종손절선": int(df['CLOSE'].iloc[-1] * (1 + stop_loss/100)),
+            "목표타격가": int(curr_price * (1 + target_profit/100)),
+            "최종손절선": int(curr_price * (1 + stop_loss/100)),
             "거래량비": round(vol_ratio, 1), "CV": round(cv_val, 2), "몸통비율": round(body_ratio, 2),
-            "유사도": round(similarity, 1), "is_valid": True if fit_score >= 50 or vol_cliff else False,
+            "유사도": round(similarity, 1), "is_valid": True, # 결과 가시성을 위해 True 고정
             "스캔날짜": target_date.strftime('%Y-%m-%d')
         }, df
-    except: return None, None
+    except Exception as e: 
+        return None, None
 
 # --- [3. UI 레이아웃] ---
-st.set_page_config(page_title="Phoenix Pulse v5.9.96", layout="wide")
+st.set_page_config(page_title="Phoenix Pulse v5.9.97", layout="wide")
 
 krx_df = get_krx_list_ultimate()
 krx_df['Display'] = krx_df['Code'] + " | " + krx_df['Name']
 
 c_head1, c_head2 = st.columns([6, 2])
-with c_head1: st.markdown(f"### 🔥 Phoenix Pulse v5.9.96 | `{st.session_state.server_status}`")
+with c_head1: st.markdown(f"### 🔥 Phoenix Pulse v5.9.97 | `{st.session_state.server_status}`")
 with c_head2:
     if st.button("🔄 리스트 동기화", use_container_width=True):
         if os.path.exists(BACKUP_KRX_FILE): os.remove(BACKUP_KRX_FILE)
         st.cache_data.clear(); st.rerun()
 
-# [사이드바] 순서 고정 히스토리
 st.sidebar.title("📁 분석 히스토리")
 for idx, log in enumerate(st.session_state.fixed_log): 
     if st.sidebar.button(f"{log['name']} ({log['code']})", key=f"side_{log['code']}_{idx}", use_container_width=True):
@@ -145,13 +146,12 @@ with st.form("main_analysis_form"):
         if matches: def_idx = matches[0]
     
     search_input = c1.selectbox("종목 선택", krx_df['Display'].tolist(), index=def_idx)
-    c2.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
     btn_click = c2.form_submit_button("🔍 정밀 분석 실행", type="primary", use_container_width=True)
     d_input = c3.date_input("날짜 지정", value=datetime.date.today())
 
 if btn_click or (st.session_state.auto_code != ""):
     target_code = search_input.split(" | ")[0] if search_input else st.session_state.auto_code
-    res, df = analyze_overload_v96(target_code, d_input)
+    res, df = analyze_overload_v97(target_code, d_input)
     if res:
         st.session_state.last_viewed = res['종목코드']
         disp_name = krx_df[krx_df['Code'] == res['종목코드']]['Name'].values[0]
@@ -175,29 +175,26 @@ st.divider()
 
 if st.button("🚀 전 종목 광역 정밀 병렬 스캔", use_container_width=True):
     st.session_state.scan_storage = []
-    prog_bar, st_text, tm_text = st.progress(0), st.empty(), st.empty()
+    prog_bar, st_text = st.progress(0), st.empty()
     start_tm, total = time.time(), len(krx_df)
     results_found = []
     with ThreadPoolExecutor(max_workers=30) as executor:
-        futures = {executor.submit(analyze_overload_v96, row['Code'], datetime.date.today()): row for _, row in krx_df.iterrows()}
+        futures = {executor.submit(analyze_overload_v97, row['Code'], datetime.date.today()): row for _, row in krx_df.iterrows()}
         for i, future in enumerate(as_completed(futures)):
             r, _ = future.result()
-            if r and r['is_valid']:
+            if r:
                 r['종목명'] = krx_df[krx_df['Code'] == r['종목코드']]['Name'].values[0]
                 results_found.append(r)
-            if i % 50 == 0 or i == total - 1:
-                elapsed = time.time() - start_tm
-                rem = (elapsed / (i+1)) * (total - (i+1)) if (i+1) > 0 else 0
+            if i % 50 == 0:
                 prog_bar.progress((i+1) / total)
                 st_text.markdown(f"**📡 정찰 중:** `{i+1}/{total}` (포착: {len(results_found)})")
-                tm_text.markdown(f"⏱️ **LAP:** `{int(elapsed//60):02}:{int(elapsed%60):02}` | **EST:** `{int(rem//60):02}:{int(rem%60):02}`")
     st.session_state.scan_storage = results_found
     st.rerun()
 
 if st.session_state.scan_storage:
     scan_df = pd.DataFrame(st.session_state.scan_storage).sort_values(by='적합도', ascending=False)
     st.markdown(f"### 📋 스캔 결과 ({len(scan_df)}개 포착)")
-    cols = ['종목명', '종목코드', '적합도', '상태', '비중', '익절목표', '손절가', '현재가', '목표타격가', '최종손절선', '유사도', '거래량비', 'CV']
+    cols = ['종목명', '종목코드', '적합도', '상태', '비중', '익절목표', '손절가', '현재가', '목표타격가', '최종손절선']
     st.dataframe(scan_df[cols], use_container_width=True, hide_index=True)
     
     selected_target = st.selectbox("🎯 타겟 락온 (상단 이동)", ["선택하세요"] + (scan_df['종목코드'] + " | " + scan_df['종목명']).tolist())
