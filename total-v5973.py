@@ -7,6 +7,7 @@ import json
 import os
 import plotly.graph_objects as go
 import time
+import requests  # [긴급 차단 해제용 패킷 통신 모듈]
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- [1. 시스템 설정 및 영속성] ---
@@ -48,27 +49,42 @@ def get_krx_list_ultimate():
         return df
     except:
         st.session_state.server_status = "⚠️ 서버 점검 중"
-        # 최소한의 기본 버퍼 데이터 반환으로 무한루프 방지
         return pd.DataFrame([{"Code": "005930", "Name": "삼성전자"}, {"Code": "000660", "Name": "SK하이닉스"}])
 
-# --- [2. 100% 순혈 KRX 정밀 분석 엔진 (v5.14.0)] ---
+# --- [2. 100% 순혈 KRX 정밀 분석 엔진 (v5.14.1 긴급 우회형)] ---
 def analyze_v14(ticker, target_date):
     ticker_str = str(ticker).zfill(6)
-    start_date = target_date - datetime.timedelta(days=180)
     priority_score = 0 
     try:
-        # 상황 1 방어: 데이터 유실 및 서버 단절 예외처리
-        df = fdr.DataReader(ticker_str, start_date, target_date)
-        if df is None or df.empty or len(df) < 35: return None, None
-
-        # 컬럼 매칭 무결성 공정
-        df = df.rename(columns={'시가':'OPEN','고가':'HIGH','저가':'LOW','종가':'CLOSE','거래량':'VOLUME'})
-        df.columns = [c.upper() for c in df.columns]
+        # ─── [🚨 크롤링 차단 긴급 해경 우회 공정] ───
+        # fdr.DataReader 마비를 파괴하기 위해 바뀐 네이버 보안 차트 API 주소로 실시간 직접 침투
+        url = f"https://fchart.stock.naver.com/sise.nhn?symbol={ticker_str}&timeframe=day&count=100&requestType=0"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        response = requests.get(url, headers=headers, timeout=5)
         
-        # 필수 거래 지표 핵심 컬럼 생존 검사
-        if not all(k in df.columns for k in ['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME']): return None, None
-        df = df[['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME']].dropna()
-        if df.empty or len(df) < 25: return None, None
+        # 보안 XML 스트림 실시간 파싱 및 정형화
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(response.text)
+        items = root.findall('.//item')
+        
+        if not items: return None, None
+        
+        data_list = []
+        for item in items:
+            data = item.attrib['data'].split('|')
+            data_list.append({
+                'Date': pd.to_datetime(data[0]),
+                'OPEN': float(data[1]),
+                'HIGH': float(data[2]),
+                'LOW': float(data[3]),
+                'CLOSE': float(data[4]),
+                'VOLUME': float(data[5])
+            })
+            
+        df = pd.DataFrame(data_list).set_index('Date')
+        df = df[df.index.date <= target_date] # 타겟 날짜 기준 데이터 슬라이싱
+        
+        if df is None or df.empty or len(df) < 35: return None, None
         
         curr_price = int(df['CLOSE'].iloc[-1])
         curr_volume = df['VOLUME'].iloc[-1]
@@ -142,12 +158,12 @@ def analyze_v14(ticker, target_date):
     except: return None, None
 
 # --- [3. UI 레이아웃] ---
-st.set_page_config(page_title="Phoenix Pulse v5.14.0", layout="wide")
+st.set_page_config(page_title="Phoenix Pulse v5.14.1", layout="wide")
 krx_df = get_krx_list_ultimate()
 krx_df['Display'] = krx_df['Code'] + " | " + krx_df['Name']
 
 c_head1, c_head2 = st.columns([6, 2])
-with c_head1: st.markdown(f"### 🔥 Phoenix Pulse v5.14.0 | Pure KRX Mode | `{st.session_state.server_status}`")
+with c_head1: st.markdown(f"### 🔥 Phoenix Pulse v5.14.1 | Sniper Core Mode | `{st.session_state.server_status}`")
 with c_head2:
     if st.button("🔄 리스트 동기화 (네트워크 리셋)", use_container_width=True):
         if os.path.exists(BACKUP_KRX_FILE): os.remove(BACKUP_KRX_FILE)
@@ -172,14 +188,16 @@ with st.form("analysis_input_form"):
     d_input = c3.date_input("날짜 지정", value=datetime.date.today())
     btn_click = c2.form_submit_button("🔍 정밀 저격 분석 실행", type="primary", use_container_width=True)
 
-# 개별 종목 실행부 예외 잠금 안전장치
 if btn_click or (st.session_state.auto_code != ""):
     t_code = selected_disp.split(" | ")[0] if not st.session_state.auto_code else st.session_state.auto_code
+    d_name = krx_df[krx_df['Code'] == t_code]['Name'].values[0]
+    
+    # [로그 패치 적용] 결과 수신 상관없이 무조건 사이드바에 먼저 흔적 기록
+    save_to_fixed_log(d_name, t_code)
+    
     res, df_chart = analyze_v14(t_code, d_input)
     if res and df_chart is not None:
         st.session_state.last_viewed = res['종목코드']
-        d_name = krx_df[krx_df['Code'] == res['종목코드']]['Name'].values[0]
-        save_to_fixed_log(d_name, res['종목코드'])
         st.session_state.auto_code = ""
         
         st.markdown(f"#### 🎯 [{d_name}] 최적 작전 전술 리포트")
@@ -189,7 +207,6 @@ if btn_click or (st.session_state.auto_code != ""):
         m3.metric("목표 가", f"{res['목표타격가']:,}원", delta="내재 변동성 익절선")
         m4.metric("최종 방어선", f"{res['최종손절선']:,}원", delta="-3.0% 원칙 손절")
         
-        # Datetime 인덱스 강제 변환으로 차트 렌더링 팅김 오타 복구
         chart_x = pd.to_datetime(df_chart.index).strftime('%Y-%m-%d') if hasattr(df_chart.index, 'strftime') else df_chart.index
         fig = go.Figure(data=[go.Candlestick(
             x=chart_x, open=df_chart['OPEN'], high=df_chart['HIGH'], low=df_chart['LOW'], close=df_chart['CLOSE'],
@@ -197,7 +214,7 @@ if btn_click or (st.session_state.auto_code != ""):
         )])
         fig.add_hline(y=res['목표타격가'], line_dash="solid", line_color="green", line_width=2)
         fig.add_hline(y=res['최종손절선'], line_dash="solid", line_color="purple", line_width=2)
-        fig.update_layout(height=450, xaxis_rangesb_visible=False, template="plotly_dark", margin=dict(l=10, r=10, t=10, b=10), xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True))
+        fig.update_layout(height=450, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=10, r=10, t=10, b=10), xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True))
         st.plotly_chart(fig, use_container_width=True)
         
         st.markdown("---")
@@ -218,7 +235,7 @@ if btn_click or (st.session_state.auto_code != ""):
         with sim2: st.success(f"**💵 권장 진입 예산 범위**\n\n지휘관 자산 기준 **{rec_budget}** 규모의 분할 진입 전략 수립이 가장 이상적입니다.")
         with sim3: st.success(f"**🎯 작전 성공 목표가**\n\n**{exp_profit}** 무리한 홀딩보다 지정된 레이저 라인 청산 프로세스를 권장합니다.")
     else:
-        st.error("📡 [통신 지연 알림] 현재 KRX 서버 단절 상태이거나 유효하지 않은 타겟입니다. 잠시 후 재점화 버튼을 누르십시오.")
+        st.error("📡 [통신 지연 알림] 현재 크롤링 경로 우회 중 오류가 발생했거나 유효하지 않은 타겟입니다.")
         st.session_state.auto_code = ""
 
 st.divider()
@@ -242,7 +259,7 @@ if st.button("🚀 전 종목 광역 정밀 병렬 스캔 (스나이퍼 모드)"
                 progress_pct = (i + 1) / total_len
                 est_rem = (elapsed / progress_pct) - elapsed if progress_pct > 0 else 0
                 p_bar.progress(progress_pct)
-                st_msg.write(f"📡 고정밀 정찰 중... ({i+1}/{total_len}) [엄격 필터 통과 타겟: {len(temp_results)}개]")
+                st_msg.write(f"📡 고정밀 실시간 정찰 중... ({i+1}/{total_len}) [엄격 필터 통과 타겟: {len(temp_results)}개]")
                 tm_msg.write(f"⏱️ **경과 시간:** `{int(elapsed)}초` | **최소 남은 시간 (EST):** `{int(est_rem)}초`")
     
     st.session_state.scan_storage = temp_results
@@ -250,12 +267,9 @@ if st.button("🚀 전 종목 광역 정밀 병렬 스캔 (스나이퍼 모드)"
         json.dump(temp_results, f, ensure_ascii=False)
     st.rerun()
 
-# 상황 2, 3방어: 포착 리스트 및 셀렉트 박스 0개 누수 원천 봉쇄
 if st.session_state.scan_storage and len(st.session_state.scan_storage) > 0:
     st.markdown(f"### 📋 스나이퍼 정예 포착 리스트 ({len(st.session_state.scan_storage)}개 정선)")
     scan_df = pd.DataFrame(st.session_state.scan_storage)
-    
-    # 구조 결함 패치: 빈 프레임 컬럼 참조 KeyError 사전 차단
     if 'priority_score' in scan_df.columns and '적합도' in scan_df.columns:
         scan_df = scan_df.sort_values(by=['priority_score', '적합도'], ascending=[False, False])
         
@@ -263,7 +277,6 @@ if st.session_state.scan_storage and len(st.session_state.scan_storage) > 0:
     existing_cols = [c for c in cols if c in scan_df.columns]
     st.dataframe(scan_df[existing_cols], use_container_width=True, hide_index=True)
     
-    # 무한 루프(Loop) 방지를 위한 selectbox 인덱스 디커플링 공정
     target_list = (scan_df['종목코드'] + " | " + scan_df['종목명']).tolist() if '종목코드' in scan_df.columns else []
     if target_list:
         lock_on = st.selectbox("🎯 타겟 락온 (상단 작전판 이동)", ["선택하세요"] + target_list, key="sniper_lock_on_widget")
@@ -273,4 +286,4 @@ if st.session_state.scan_storage and len(st.session_state.scan_storage) > 0:
                 st.session_state.auto_code = next_code
                 st.rerun()
 else:
-    st.info("📡 [정찰 브리핑] 현재 엄격 필터를 통과한 정예 타겟이 0개입니다. 시장 주도 대금이 돌 때까지 대기 기조를 유지하십시오.")
+    st.info("📡 [정찰 브리핑] 현재 엄격 필터를 통과한 정예 타겟이 0개입니다.")
