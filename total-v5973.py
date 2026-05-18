@@ -7,10 +7,16 @@ import json
 import os
 import plotly.graph_objects as go
 import time
-import requests  # [긴급 차단 해제용 패킷 통신 모듈]
+import random
+import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# --- [1. 시스템 설정 및 영속성] ---
+# --- [1. 최상단 시스템 설정 및 세션/네트워크 무결성 고정] ---
+if "network_session" not in st.session_state:
+    session = requests.Session()
+    session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'})
+    st.session_state.network_session = session
+
 SCAN_RESULT_FILE = "last_scan_results.json"
 BACKUP_KRX_FILE = "backup_krx.json"
 
@@ -51,18 +57,28 @@ def get_krx_list_ultimate():
         st.session_state.server_status = "⚠️ 서버 점검 중"
         return pd.DataFrame([{"Code": "005930", "Name": "삼성전자"}, {"Code": "000660", "Name": "SK하이닉스"}])
 
-# --- [2. 100% 순혈 KRX 정밀 분석 엔진 (v5.14.1 긴급 우회형)] ---
-def analyze_v14(ticker, target_date):
+# --- [2. 100% 순혈 KRX 정밀 분석 엔진 (v5.14.3 버그 프리형)] ---
+def analyze_v14(ticker, target_date, is_parallel=False):
     ticker_str = str(ticker).zfill(6)
     priority_score = 0 
     try:
-        # ─── [🚨 크롤링 차단 긴급 해경 우회 공정] ───
-        # fdr.DataReader 마비를 파괴하기 위해 바뀐 네이버 보안 차트 API 주소로 실시간 직접 침투
+        # [🚨 패치] 병렬 스캔 시에는 딜레이 폭을 넓혀 IP 차단 확률을 제로(0)에 수렴시킴
+        if is_parallel:
+            time.sleep(random.uniform(0.02, 0.08))
+        else:
+            time.sleep(random.uniform(0.005, 0.02))
+            
         url = f"https://fchart.stock.naver.com/sise.nhn?symbol={ticker_str}&timeframe=day&count=100&requestType=0"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-        response = requests.get(url, headers=headers, timeout=5)
         
-        # 보안 XML 스트림 실시간 파싱 및 정형화
+        # [🚨 패치] 멀티스레드 환경 안정성을 위해 스레드 모드에 따른 세션 분리 분기 처리
+        if is_parallel:
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            response = requests.get(url, headers=headers, timeout=5)
+        else:
+            response = st.session_state.network_session.get(url, timeout=7)
+            
+        if response.status_code != 200: return None, None
+        
         import xml.etree.ElementTree as ET
         root = ET.fromstring(response.text)
         items = root.findall('.//item')
@@ -82,7 +98,7 @@ def analyze_v14(ticker, target_date):
             })
             
         df = pd.DataFrame(data_list).set_index('Date')
-        df = df[df.index.date <= target_date] # 타겟 날짜 기준 데이터 슬라이싱
+        df = df[df.index.date <= target_date]
         
         if df is None or df.empty or len(df) < 35: return None, None
         
@@ -98,7 +114,7 @@ def analyze_v14(ticker, target_date):
         vol_ratio = round(curr_volume / (df['VOLUME'].iloc[-21:-1].mean() + 1), 2)
         body_ratio = round((df['CLOSE'].iloc[-1] - df['OPEN'].iloc[-1]).abs() / (df['HIGH'].iloc[-1] - df['LOW'].iloc[-1] + 0.001), 2)
         
-        # --- [패턴 B 심화 수식 대입] ---
+        # 순혈 패턴 B 심화 수식 고정
         is_pattern_b_advanced = False
         if len(df) >= 7:
             recent_6 = df.iloc[-6:]
@@ -158,12 +174,12 @@ def analyze_v14(ticker, target_date):
     except: return None, None
 
 # --- [3. UI 레이아웃] ---
-st.set_page_config(page_title="Phoenix Pulse v5.14.1", layout="wide")
+st.set_page_config(page_title="Phoenix Pulse v5.14.3", layout="wide")
 krx_df = get_krx_list_ultimate()
 krx_df['Display'] = krx_df['Code'] + " | " + krx_df['Name']
 
 c_head1, c_head2 = st.columns([6, 2])
-with c_head1: st.markdown(f"### 🔥 Phoenix Pulse v5.14.1 | Sniper Core Mode | `{st.session_state.server_status}`")
+with c_head1: st.markdown(f"### 🔥 Phoenix Pulse v5.14.3 | Perfect Shield Mode | `{st.session_state.server_status}`")
 with c_head2:
     if st.button("🔄 리스트 동기화 (네트워크 리셋)", use_container_width=True):
         if os.path.exists(BACKUP_KRX_FILE): os.remove(BACKUP_KRX_FILE)
@@ -192,10 +208,9 @@ if btn_click or (st.session_state.auto_code != ""):
     t_code = selected_disp.split(" | ")[0] if not st.session_state.auto_code else st.session_state.auto_code
     d_name = krx_df[krx_df['Code'] == t_code]['Name'].values[0]
     
-    # [로그 패치 적용] 결과 수신 상관없이 무조건 사이드바에 먼저 흔적 기록
     save_to_fixed_log(d_name, t_code)
     
-    res, df_chart = analyze_v14(t_code, d_input)
+    res, df_chart = analyze_v14(t_code, d_input, is_parallel=False)
     if res and df_chart is not None:
         st.session_state.last_viewed = res['종목코드']
         st.session_state.auto_code = ""
@@ -235,7 +250,7 @@ if btn_click or (st.session_state.auto_code != ""):
         with sim2: st.success(f"**💵 권장 진입 예산 범위**\n\n지휘관 자산 기준 **{rec_budget}** 규모의 분할 진입 전략 수립이 가장 이상적입니다.")
         with sim3: st.success(f"**🎯 작전 성공 목표가**\n\n**{exp_profit}** 무리한 홀딩보다 지정된 레이저 라인 청산 프로세스를 권장합니다.")
     else:
-        st.error("📡 [통신 지연 알림] 현재 크롤링 경로 우회 중 오류가 발생했거나 유효하지 않은 타겟입니다.")
+        st.error("📡 [통신 지연 알림] 현재 크롤링 경로 우회 중 오류가 발생했거나 유효하지 않은 타겟입니다. 잠시 후 재시도하십시오.")
         st.session_state.auto_code = ""
 
 st.divider()
@@ -246,8 +261,9 @@ if st.button("🚀 전 종목 광역 정밀 병렬 스캔 (스나이퍼 모드)"
     st_msg, tm_msg = st.empty(), st.empty()
     start_time, total_len = time.time(), len(krx_df)
     
-    with ThreadPoolExecutor(max_workers=30) as executor:
-        futures = {executor.submit(analyze_v14, row['Code'], d_input): row for _, row in krx_df.iterrows()}
+    # [🚨 패치] 병렬 안정성을 위해 대기조 인원을 8명으로 최종 정예화, 단독 세션 타격 부여
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(analyze_v14, row['Code'], d_input, True): row for _, row in krx_df.iterrows()}
         for i, future in enumerate(as_completed(futures)):
             r, _ = future.result()
             if r and r['is_valid']: 
